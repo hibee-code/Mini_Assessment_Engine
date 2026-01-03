@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# Environment Variables
+.env
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+# (Keeping scripts might be desired, but often local scripts are ignored. 
+# However, for this assessment they are part of the solution, so I will NOT ignore them generally, 
+# but ignoring the .env requires this file.)

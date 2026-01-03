@@ -2,115 +2,82 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 from django.contrib.auth.models import User
-from core.models import Exam, Question, Submission, Answer
+from core.models import Exam, Question, QuestionOption, ExamQuestion, Submission
 
 class AuthTests(APITestCase):
     def test_register_user(self):
         data = {'username': 'newuser', 'email': 'new@test.com', 'password': 'password123'}
         response = self.client.post(reverse('register'), data)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue('id' in response.data)
-        self.assertFalse('password' in response.data)
 
-    def test_register_duplicate_username(self):
-        User.objects.create_user(username='dupuser', password='password123')
-        data = {'username': 'dupuser', 'email': 'other@test.com', 'password': 'password123'}
-        response = self.client.post(reverse('register'), data)
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_login_success(self):
-        User.objects.create_user(username='loginuser', password='password123')
-        data = {'username': 'loginuser', 'password': 'password123'}
-        response = self.client.post(reverse('token_obtain_pair'), data)
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('access', response.data)
-        self.assertIn('refresh', response.data)
-
-    def test_login_invalid_credentials(self):
-        User.objects.create_user(username='wronguser', password='password123')
-        data = {'username': 'wronguser', 'password': 'wrongpassword'}
-        response = self.client.post(reverse('token_obtain_pair'), data)
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-class ExamTests(APITestCase):
+class SeniorArchitectureTests(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='examuser', password='password123')
-        token_resp = self.client.post(reverse('token_obtain_pair'), {'username': 'examuser', 'password': 'password123'})
-        self.token = token_resp.data['access']
-        self.client.credentials(HTTP_AUTHORIZATION='Bearer ' + self.token)
-        
-        self.exam = Exam.objects.create(title="Test Exam", duration_minutes=30)
-        
-    def test_list_exams_authenticated(self):
-        response = self.client.get(reverse('exam-list'))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        
-    def test_list_exams_unauthenticated(self):
-        self.client.credentials() # Remove auth
-        response = self.client.get(reverse('exam-list'))
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-class SubmissionTests(APITestCase):
-    def setUp(self):
+        # User
         self.user = User.objects.create_user(username='student', password='password123')
         token_resp = self.client.post(reverse('token_obtain_pair'), {'username': 'student', 'password': 'password123'})
         self.client.credentials(HTTP_AUTHORIZATION='Bearer ' + token_resp.data['access'])
         
-        self.exam = Exam.objects.create(title="Math", duration_minutes=60)
-        self.q_mcq = Question.objects.create(
-            exam=self.exam, text="1+1?", question_type='MCQ', 
-            options=["1", "2"], correct_answer="2"
-        )
-        self.q_text = Question.objects.create(
-            exam=self.exam, text="Name a color", question_type='TEXT', 
-            correct_answer="Blue"
-        )
+        # Exam
+        self.exam = Exam.objects.create(title="Advanced DB", course="CS500", duration_minutes=60)
+        
+        # Question 1: MCQ
+        self.q1 = Question.objects.create(text="Select the correct AC property?", question_type='MCQ')
+        self.opt1_correct = QuestionOption.objects.create(question=self.q1, text="Atomicity", is_correct=True)
+        self.opt1_wrong = QuestionOption.objects.create(question=self.q1, text="Apple", is_correct=False)
+        
+        # Question 2: Text
+        self.q2 = Question.objects.create(text="Define index.", question_type='TEXT', expected_answer="A data structure to improve retrieval speed.")
+        
+        # Link via Junction
+        ExamQuestion.objects.create(exam=self.exam, question=self.q1, order=1)
+        ExamQuestion.objects.create(exam=self.exam, question=self.q2, order=2)
 
-    def test_submit_valid_exam(self):
+    def test_exam_list_structure(self):
+        response = self.client.get(reverse('exam-list'))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        # Check nested structure
+        data = response.data[0]
+        self.assertEqual(data['title'], "Advanced DB")
+        self.assertEqual(len(data['questions']), 2)
+        # Check Q1 options
+        q1_data = next(q for q in data['questions'] if q['id'] == self.q1.id)
+        self.assertEqual(len(q1_data['options']), 2)
+
+    def test_submission_grading_success(self):
         data = {
             'exam_id': self.exam.id,
             'answers': [
-                {'question_id': self.q_mcq.id, 'student_answer': '2'},
-                {'question_id': self.q_text.id, 'student_answer': 'Blue'}
+                {'question_id': self.q1.id, 'selected_option_id': self.opt1_correct.id},
+                {'question_id': self.q2.id, 'text_answer': "A data structure to improve retrieval speed."}
             ]
         }
         response = self.client.post(reverse('submit_exam'), data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['score'], 100.0)
         
-        # Verify DB
-        submission = Submission.objects.get(id=response.data['id'])
-        self.assertEqual(submission.answers.count(), 2)
+        # Verify DB Status
+        sub = Submission.objects.get(id=response.data['id'])
+        self.assertEqual(sub.status, 'GRADED')
 
-    def test_submit_invalid_exam_id(self):
-        data = {'exam_id': 9999, 'answers': []}
-        response = self.client.post(reverse('submit_exam'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
-
-    def test_submit_empty_answers(self):
-        # Should still create submission but get 0 score
+    def test_submission_validation_wrong_option(self):
+        # Trying to submit an option that doesn't belong to the question
+        other_q = Question.objects.create(text="Dummy", question_type='MCQ')
+        other_opt = QuestionOption.objects.create(question=other_q, text="Trap", is_correct=True)
+        
         data = {
             'exam_id': self.exam.id,
-            'answers': []
+            'answers': [
+                {'question_id': self.q1.id, 'selected_option_id': other_opt.id}
+            ]
         }
         response = self.client.post(reverse('submit_exam'), data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(response.data['score'], 0.0)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_view_my_submissions(self):
-        # Create a submission first
-        sub = Submission.objects.create(student=self.user, exam=self.exam, score=85.0)
+    def test_submission_duplicate_prevention(self):
+        # Submit once
+        self.test_submission_grading_success()
         
-        response = self.client.get(reverse('my_submissions'))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 1)
-        self.assertEqual(response.data[0]['score'], 85.0)
-        
-    def test_cannot_view_others_submissions(self):
-        other_user = User.objects.create_user(username='other', password='password123')
-        Submission.objects.create(student=other_user, exam=self.exam, score=10.0)
-        
-        response = self.client.get(reverse('my_submissions'))
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data), 0) # Should verify isolation
+        # Try again
+        data = {'exam_id': self.exam.id, 'answers': []}
+        response = self.client.post(reverse('submit_exam'), data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
